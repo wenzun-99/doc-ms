@@ -1,4 +1,5 @@
 import logging
+from io import BytesIO
 
 import magic
 from allauth.mfa.adapter import get_adapter as get_mfa_adapter
@@ -9,6 +10,10 @@ from allauth.socialaccount.models import SocialApp
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from PIL import Image
+from PIL import ImageOps
+from PIL import UnidentifiedImageError
 from rest_framework import serializers
 from rest_framework.authtoken.serializers import AuthTokenSerializer
 
@@ -17,6 +22,102 @@ from paperless.validators import reject_dangerous_svg
 from paperless_mail.serialisers import ObfuscatedPasswordField
 
 logger = logging.getLogger("paperless.settings")
+
+
+def strip_image_metadata(uploaded_file, mime_type: str | None):
+    """Return a copy of ``uploaded_file`` with EXIF/ICC metadata removed."""
+
+    if uploaded_file is None:
+        return uploaded_file
+
+    original_position = uploaded_file.tell() if hasattr(uploaded_file, "tell") else None
+    image = None
+
+    sanitized = None
+
+    try:
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        image = Image.open(uploaded_file)
+        image.load()
+    except (UnidentifiedImageError, OSError):
+        if hasattr(uploaded_file, "seek") and original_position is not None:
+            uploaded_file.seek(original_position)
+        return uploaded_file
+
+    try:
+        image_format = (image.format or "").upper()
+        image = ImageOps.exif_transpose(image)
+
+        if image_format not in {"JPEG", "JPG", "PNG"}:
+            if hasattr(uploaded_file, "seek") and original_position is not None:
+                uploaded_file.seek(original_position)
+            return uploaded_file
+
+        if hasattr(image, "info"):
+            image.info.pop("exif", None)
+            image.info.pop("icc_profile", None)
+            image.info.pop("comment", None)
+
+        if image_format in {"JPEG", "JPG"}:
+            sanitized = image.convert("RGB")
+            save_kwargs = {
+                "format": "JPEG",
+                "quality": 95,
+                "subsampling": 0,
+                "optimize": True,
+                "exif": b"",
+            }
+        else:  # PNG
+            target_mode = (
+                "RGBA"
+                if ("A" in image.mode or image.info.get("transparency"))
+                else "RGB"
+            )
+            sanitized = image.convert(target_mode)
+            save_kwargs = {
+                "format": "PNG",
+                "optimize": True,
+            }
+
+        buffer = BytesIO()
+        try:
+            sanitized.save(buffer, **save_kwargs)
+        except (OSError, ValueError):
+            buffer = BytesIO()
+            if image_format in {"JPEG", "JPG"}:
+                sanitized.save(
+                    buffer,
+                    format="JPEG",
+                    quality=90,
+                    subsampling=0,
+                    exif=b"",
+                )
+            else:
+                sanitized.save(
+                    buffer,
+                    format="PNG",
+                )
+
+        buffer.seek(0)
+
+        if hasattr(uploaded_file, "close"):
+            try:
+                uploaded_file.close()
+            except Exception:
+                pass
+
+        content_type = getattr(uploaded_file, "content_type", None) or mime_type
+        return SimpleUploadedFile(
+            name=getattr(uploaded_file, "name", "logo"),
+            content=buffer.getvalue(),
+            content_type=content_type,
+        )
+    finally:
+        if sanitized is not None:
+            sanitized.close()
+        if image is not None:
+            image.close()
 
 
 class PaperlessAuthTokenSerializer(AuthTokenSerializer):
@@ -209,9 +310,22 @@ class ApplicationConfigurationSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
     def validate_app_logo(self, file):
-        if file and magic.from_buffer(file.read(2048), mime=True) == "image/svg+xml":
+        if not file:
+            return file
+
+        if hasattr(file, "seek"):
+            file.seek(0)
+        mime_type = magic.from_buffer(file.read(2048), mime=True)
+        if hasattr(file, "seek"):
+            file.seek(0)
+
+        if mime_type == "image/svg+xml":
             reject_dangerous_svg(file)
-        return file
+            if hasattr(file, "seek"):
+                file.seek(0)
+            return file
+
+        return strip_image_metadata(file, mime_type)
 
     class Meta:
         model = ApplicationConfiguration

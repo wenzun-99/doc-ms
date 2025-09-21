@@ -1,10 +1,17 @@
 import json
+from fractions import Fraction
+from io import BytesIO
 from pathlib import Path
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:  # pragma: no cover - Pillow is required in production
+    Image = None  # type: ignore[assignment]
 
 from documents.tests.utils import DirectoriesMixin
 from paperless.models import ApplicationConfiguration
@@ -189,6 +196,74 @@ class TestApiAppConfig(DirectoriesMixin, APITestCase):
             },
         )
         self.assertFalse(Path(old_logo.path).exists())
+
+    def test_api_strips_metadata_from_logo_upload(self):
+        """
+        GIVEN:
+            - An image file containing EXIF metadata including GPS coordinates
+        WHEN:
+            - Uploaded via PATCH to app config
+        THEN:
+            - Stored logo no longer contains EXIF metadata
+        """
+        if Image is None:
+            self.skipTest("Pillow is not installed")
+
+        if not hasattr(Image, "Exif"):
+            self.skipTest("Current Pillow version cannot create EXIF metadata")
+
+        assert Image is not None
+
+        exif = Image.Exif()
+        exif[0x010E] = "Test description"  # ImageDescription
+        exif[0x8825] = {
+            1: "N",  # GPSLatitudeRef
+            2: (Fraction(51, 1), Fraction(30, 1), Fraction(0, 1)),
+            3: "E",  # GPSLongitudeRef
+            4: (Fraction(0, 1), Fraction(7, 1), Fraction(0, 1)),
+        }
+
+        buffer = BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buffer, format="JPEG", exif=exif)
+        buffer.seek(0)
+
+        with Image.open(BytesIO(buffer.getvalue())) as uploaded_image:
+            self.assertGreater(len(uploaded_image.getexif()), 0)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}1/",
+            {
+                "app_logo": SimpleUploadedFile(
+                    name="with_exif.jpg",
+                    content=buffer.getvalue(),
+                    content_type="image/jpeg",
+                ),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        config = ApplicationConfiguration.objects.first()
+        stored_logo = Path(config.app_logo.path)
+        self.assertTrue(stored_logo.exists())
+
+        with Image.open(stored_logo) as sanitized:
+            sanitized_exif = sanitized.getexif()
+            self.assertNotEqual(sanitized_exif.get(0x010E), "Test description")
+
+            gps_ifd = None
+            if hasattr(sanitized_exif, "get_ifd"):
+                try:
+                    gps_ifd = sanitized_exif.get_ifd(0x8825)
+                except KeyError:
+                    gps_ifd = None
+            else:
+                gps_ifd = sanitized_exif.get(0x8825)
+
+            if gps_ifd is not None:
+                self.assertEqual(len(gps_ifd), 0, "GPS metadata should be cleared")
+
+            self.assertNotIn("exif", sanitized.info)
 
     def test_api_rejects_malicious_svg_logo(self):
         """
