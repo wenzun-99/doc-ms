@@ -103,6 +103,9 @@ export class TagsComponent implements OnInit, ControlValueAccessor {
   @Input()
   multiple: boolean = true
 
+  @Input()
+  autoHeirarchy: boolean = true
+
   @Output()
   filterDocuments = new EventEmitter<Tag[]>()
 
@@ -134,7 +137,7 @@ export class TagsComponent implements OnInit, ControlValueAccessor {
       oldValue.splice(index, 1)
 
       // remove children
-      oldValue = this.removeChildren(oldValue, tag)
+      if (this.autoHeirarchy) oldValue = this.removeChildren(oldValue, tag)
 
       this.value = [...oldValue]
       this.onChange(this.value)
@@ -153,7 +156,7 @@ export class TagsComponent implements OnInit, ControlValueAccessor {
   }
 
   public onAdd(tag: Tag) {
-    if (tag.parent) {
+    if (this.autoHeirarchy && tag.parent) {
       // add all parents recursively
       const parent = this.getTag(tag.parent)
       this.value = [...this.value, parent.id]
