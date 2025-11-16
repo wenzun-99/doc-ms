@@ -80,8 +80,24 @@ RUN set -eux \
       && apt-get --yes autoremove --purge \
       && rm -rf /var/lib/apt/lists/*
 
+# # Added on 14 Nov 2025
+# =====================================================================
+# FIX: Convert CRLF line endings in all s6-overlay service files
+# This prevents: "fatal: invalid /etc/s6-overlay/s6-rc.d/.../type"
+# =====================================================================
+RUN set -eux \
+    && find /etc/s6-overlay/s6-rc.d -type f -exec sed -i 's/\r$//' {} \; || true
+# End Added
+
 # Copy our service defs and filesystem
 COPY ./docker/rootfs /
+
+# Added on 14 Nov 2025 - CRLF cleanup after rootfs copy
+RUN set -eux \
+    && if [ -d /etc/s6-overlay/s6-rc.d ]; then \
+        find /etc/s6-overlay/s6-rc.d -type f -exec sed -i 's/\r$//' {} \; ; \
+    fi
+# End Added
 
 # Stage: main-app
 # Purpose: The final image
@@ -235,6 +251,13 @@ COPY --chown=1000:1000 ./src ./
 
 # copy frontend
 COPY --from=compile-frontend --chown=1000:1000 /src/src/documents/static/frontend/ ./documents/static/frontend/
+
+# Added on 14 Nov 2025 - Final CRLF cleanup in main app image
+RUN set -eux \
+    && if [ -d /etc/s6-overlay/s6-rc.d ]; then \
+        find /etc/s6-overlay/s6-rc.d -type f -exec sed -i 's/\r$//' {} \; ; \
+    fi
+# End Added
 
 # add users, setup scripts
 # Mount the compiled frontend to expected location
