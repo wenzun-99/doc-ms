@@ -34,7 +34,7 @@ jobs:
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: chore: merge upstream/main into main
+          commit-message: "chore: merge upstream/main into main"
           title: '[sync] upstream main -> main'
           body: 'Automated sync from upstream repository.'
           base: main
