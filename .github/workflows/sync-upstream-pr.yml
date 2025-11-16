@@ -1,42 +1,74 @@
-name: Sync fork with upstream (create PR on conflicts)
+name: Sync fork with upstream (merge if clean, else open PR)
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 0 * * *'   # runs daily at 00:00 UTC (adjust if you want local time)
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fork
+      - name: Checkout fork (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Add upstream remote
+      - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git || true
-          git fetch upstream
+          git fetch upstream --no-tags
 
-      - name: Create temp merge branch
+      - name: Ensure local main matches origin/main
         run: |
+          git checkout main
+          git reset --hard origin/main
+
+      - name: Try fast-forward or auto-merge upstream/main
+        id: try_merge
+        run: |
+          set -e
+          # Try a fast-forward first (safe)
+          if git merge --ff-only upstream/main; then
+            echo "merged=ff" >> $GITHUB_OUTPUT
+          else
+            # Try a non-fast-forward merge (create commit)
+            if git merge --no-ff --no-edit upstream/main; then
+              echo "merged=merge" >> $GITHUB_OUTPUT
+            else
+              echo "merged=conflict" >> $GITHUB_OUTPUT
+            fi
+          fi
+        continue-on-error: true
+
+      - name: Push to origin/main if merged cleanly
+        if: steps.try_merge.outputs.merged != 'conflict'
+        run: |
+          git push origin main
+
+      - name: Create PR if merge conflict happened
+        if: steps.try_merge.outputs.merged == 'conflict'
+        run: |
+          # create a branch from origin/main and push the attempted merge result for manual inspection
           git checkout -b sync/upstream-main
           git reset --hard origin/main
           git merge --no-ff --no-commit upstream/main || true
           git commit -m "chore: merge upstream/main into sync/upstream-main" || true
           git push --force origin sync/upstream-main
 
-      - name: Create Pull Request
+      - name: Open pull request (when conflict)
+        if: steps.try_merge.outputs.merged == 'conflict'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore: merge upstream/main into main"
           title: '[sync] upstream main -> main'
-          body: 'Automated sync from upstream repository.'
+          body: 'Automated sync from upstream repository. Manual merge required due to conflicts.'
           base: main
           head: sync/upstream-main
           labels: automated, sync
